@@ -253,7 +253,8 @@ def _process_account(
                 date_part = "unknown"
             else:
                 date_part = post_date.strftime("%Y%m%d")
-            file_name = f"{date_part}__{saved_count + 1:03d}.png"
+            post_url_slug = _url_slug(resolved_url)
+            file_name = f"{date_part}__{saved_count + 1:03d}__{post_url_slug}.png"
             out_path = account_output_dir / file_name
             out_path.write_bytes(png_bytes)
             saved_count += 1

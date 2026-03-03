@@ -29,4 +29,4 @@ Supported account domains:
 - `reddit.com`
 
 Output screenshots are saved under:
-- `./output/screenshots/<platform>__<account_slug>/YYYYMMDD__NNN.png`
+- `./output/screenshots/<platform>__<account_slug>/YYYYMMDD__NNN__<post_url_slug>.png`
