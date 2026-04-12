@@ -208,11 +208,21 @@ def _process_account(
                     f"[{adapter.name}] WARNING: Skipped post (resolved to non-post/non-account URL): {resolved_url}"
                 )
                 continue
+            fallback_capture = None
+            prepare_fallback = getattr(adapter, "prepare_capture_fallback", None)
+            if callable(prepare_fallback):
+                fallback_capture = prepare_fallback(post_page, resolved_url)
+            adapter.wait_for_post_ready(post_page)
             skip_reason = adapter.capture_skip_reason(post_page, account_url)
             if skip_reason is not None:
-                skipped_duplicate += 1
-                print(f"[{adapter.name}] WARNING: Skipped post ({skip_reason}): {resolved_url}")
-                continue
+                render_fallback = getattr(adapter, "render_capture_fallback", None)
+                if fallback_capture is not None and callable(render_fallback):
+                    if render_fallback(post_page, fallback_capture):
+                        skip_reason = None
+                if skip_reason is not None:
+                    skipped_duplicate += 1
+                    print(f"[{adapter.name}] WARNING: Skipped post ({skip_reason}): {resolved_url}")
+                    continue
             post_html_name = f"post_{visited_count:03d}__{_url_slug(resolved_url)}.html"
             _save_html_snapshot(post_page, account_html_dir / post_html_name, adapter.name)
             if resolved_url in visited_urls_seen:
@@ -222,7 +232,6 @@ def _process_account(
                 )
                 continue
             visited_urls_seen.add(resolved_url)
-            adapter.wait_for_post_ready(post_page)
             dt = adapter.extract_post_datetime(post_page)
             post_date = utc_date(dt)
             if post_date is None:
