@@ -10,9 +10,12 @@ from typing import TYPE_CHECKING, Optional, Sequence
 from magpie.platforms import get_adapter_for_url
 from magpie.utils import ensure_dir, in_date_range, parse_strict_date, sha256_hex, utc_date
 
-ACCOUNT_PAGE_SCROLLS = 8
-ACCOUNT_PAGE_SCROLL_PAUSE_MS = 1000
 NAV_TIMEOUT_MS = 30000
+ACCOUNT_PAGE_SCROLL_DELTA_Y = 400
+ACCOUNT_PAGE_SCROLL_PAUSE_MS = 1000
+ACCOUNT_PAGE_MAX_SCROLLS = 40
+ACCOUNT_PAGE_STALL_LIMIT = 3
+ACCOUNT_PAGE_POST_BOUNDARY_BUFFER_SCROLLS = 3
 SCREENSHOT_WIDTH = 1600
 SCREENSHOT_HEIGHT = 900
 DEFAULT_USER_AGENT = (
@@ -164,9 +167,8 @@ def _process_account(
     page = context.new_page()
     try:
         page.goto(account_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-        _scroll_account_page(page)
         _save_html_snapshot(page, account_html_dir / "account.html", adapter.name)
-        post_links = adapter.collect_post_links(page, account_url)
+        post_links = _collect_account_post_links(page, adapter, account_url, args.start_date)
     except Error as exc:
         print(f"[{adapter.name}] WARNING: Failed account page load/parse: {account_url} ({exc})")
         page.close()
@@ -275,10 +277,71 @@ def _process_account(
     )
 
 
+def _collect_account_post_links(
+    page: "Page",
+    adapter: object,
+    account_url: str,
+    start_date: Optional[date],
+) -> list[str]:
+    if getattr(adapter, "name", None) != "x":
+        return adapter.collect_post_links(page, account_url)
+
+    links: list[str] = []
+    seen: set[str] = set()
+    stalled_scrolls = 0
+    previous_link_count = 0
+    crossed_start_date_boundary = start_date is None
+    boundary_buffer_scrolls_remaining = 0
+
+    for _ in range(ACCOUNT_PAGE_MAX_SCROLLS + 1):
+        for link in adapter.collect_post_links(page, account_url):
+            if link not in seen:
+                seen.add(link)
+                links.append(link)
+
+        if start_date is not None and not crossed_start_date_boundary:
+            visible_dates = adapter.visible_timeline_dates(page)
+            visible_utc_dates = [utc_date(dt) for dt in visible_dates]
+            visible_utc_dates = [d for d in visible_utc_dates if d is not None]
+            if visible_utc_dates and min(visible_utc_dates) <= start_date:
+                crossed_start_date_boundary = True
+                boundary_buffer_scrolls_remaining = ACCOUNT_PAGE_POST_BOUNDARY_BUFFER_SCROLLS
+
+        if len(links) == previous_link_count:
+            stalled_scrolls += 1
+        else:
+            stalled_scrolls = 0
+            previous_link_count = len(links)
+
+        if crossed_start_date_boundary:
+            if boundary_buffer_scrolls_remaining > 0:
+                boundary_buffer_scrolls_remaining -= 1
+            elif stalled_scrolls >= ACCOUNT_PAGE_STALL_LIMIT:
+                break
+        elif stalled_scrolls >= ACCOUNT_PAGE_STALL_LIMIT:
+            break
+
+        _scroll_account_page(page)
+
+    return links
+
+
 def _scroll_account_page(page: "Page") -> None:
-    for _ in range(ACCOUNT_PAGE_SCROLLS):
-        page.mouse.wheel(0, 2500)
-        page.wait_for_timeout(ACCOUNT_PAGE_SCROLL_PAUSE_MS)
+    page.evaluate(
+        """
+        (deltaY) => {
+          const scroller =
+            document.scrollingElement ||
+            document.documentElement ||
+            document.body;
+          if (!scroller) return;
+          scroller.scrollBy(0, deltaY);
+          window.scrollBy(0, deltaY);
+        }
+        """,
+        ACCOUNT_PAGE_SCROLL_DELTA_Y,
+    )
+    page.wait_for_timeout(ACCOUNT_PAGE_SCROLL_PAUSE_MS)
 
 
 def _save_html_snapshot(page: "Page", path: Path, platform_name: str) -> None:

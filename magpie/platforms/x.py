@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import urljoin, urlparse
 
-from magpie.utils import account_slug_from_url, extract_datetime_from_page
+from magpie.utils import account_slug_from_url, extract_datetime_from_page, parse_datetime
 
 if TYPE_CHECKING:
     from playwright.sync_api import Page
@@ -78,6 +78,18 @@ class XAdapter:
         if dt is not None:
             return dt
         return self._datetime_from_status_url(post_page.url)
+
+    def visible_timeline_dates(self, page: Page) -> list[datetime]:
+        raw_values = page.eval_on_selector_all(
+            "article time[datetime]",
+            "els => els.map(el => el.getAttribute('datetime')).filter(Boolean)",
+        )
+        dates: list[datetime] = []
+        for raw in raw_values:
+            dt = parse_datetime(raw)
+            if dt is not None:
+                dates.append(dt)
+        return dates
 
     def _normalize_status_url(self, path: str, target_user: Optional[str]) -> Optional[str]:
         if "/analytics" in path:
