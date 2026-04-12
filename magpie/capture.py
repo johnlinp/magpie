@@ -199,30 +199,35 @@ def _process_account(
         post_page = context.new_page()
         try:
             visited_count += 1
-            post_page.route("**/accounts/login/**", lambda route: route.abort())
-            post_page.goto(link, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-            resolved_url = post_page.url
+            resolved_url = link
+            if getattr(adapter, "name", None) == "instagram":
+                build_capture_html = getattr(adapter, "build_capture_html", None)
+                if callable(build_capture_html):
+                    generated_html_name = (
+                        f"post_{visited_count:03d}__{_url_slug(resolved_url)}__generated.html"
+                    )
+                    generated_html_path = account_html_dir / generated_html_name
+                    generated_html_path.write_text(
+                        build_capture_html(resolved_url),
+                        encoding="utf-8",
+                    )
+                adapter.render_post_for_capture(post_page, resolved_url)
+            else:
+                post_page.route("**/accounts/login/**", lambda route: route.abort())
+                post_page.goto(link, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                resolved_url = post_page.url
             if not adapter.is_valid_post_url(resolved_url, account_url):
                 skipped_duplicate += 1
                 print(
                     f"[{adapter.name}] WARNING: Skipped post (resolved to non-post/non-account URL): {resolved_url}"
                 )
                 continue
-            fallback_capture = None
-            prepare_fallback = getattr(adapter, "prepare_capture_fallback", None)
-            if callable(prepare_fallback):
-                fallback_capture = prepare_fallback(post_page, resolved_url)
             adapter.wait_for_post_ready(post_page)
             skip_reason = adapter.capture_skip_reason(post_page, account_url)
             if skip_reason is not None:
-                render_fallback = getattr(adapter, "render_capture_fallback", None)
-                if fallback_capture is not None and callable(render_fallback):
-                    if render_fallback(post_page, fallback_capture):
-                        skip_reason = None
-                if skip_reason is not None:
-                    skipped_duplicate += 1
-                    print(f"[{adapter.name}] WARNING: Skipped post ({skip_reason}): {resolved_url}")
-                    continue
+                skipped_duplicate += 1
+                print(f"[{adapter.name}] WARNING: Skipped post ({skip_reason}): {resolved_url}")
+                continue
             post_html_name = f"post_{visited_count:03d}__{_url_slug(resolved_url)}.html"
             _save_html_snapshot(post_page, account_html_dir / post_html_name, adapter.name)
             if resolved_url in visited_urls_seen:
@@ -232,7 +237,12 @@ def _process_account(
                 )
                 continue
             visited_urls_seen.add(resolved_url)
-            dt = adapter.extract_post_datetime(post_page)
+            dt = None
+            profile_post_datetime = getattr(adapter, "profile_post_datetime", None)
+            if callable(profile_post_datetime):
+                dt = profile_post_datetime(resolved_url)
+            if dt is None:
+                dt = adapter.extract_post_datetime(post_page)
             post_date = utc_date(dt)
             if post_date is None:
                 print(
@@ -243,6 +253,14 @@ def _process_account(
             if args.start_date or args.end_date:
                 if post_date is None:
                     skipped_missing_datetime += 1
+                    error_screenshot_path = _save_error_screenshot(
+                        post_page,
+                        account_output_dir,
+                        visited_count,
+                        resolved_url,
+                    )
+                    if error_screenshot_path is not None:
+                        print(f"[{adapter.name}] DEBUG: saved error screenshot {error_screenshot_path}")
                     print(
                         f"[{adapter.name}] WARNING: Skipped post (missing datetime): {resolved_url}"
                     )
@@ -276,6 +294,14 @@ def _process_account(
             print(f"[{adapter.name}] saved {out_path}")
         except Error as exc:
             post_errors += 1
+            error_screenshot_path = _save_error_screenshot(
+                post_page,
+                account_output_dir,
+                visited_count,
+                resolved_url if "resolved_url" in locals() else link,
+            )
+            if error_screenshot_path is not None:
+                print(f"[{adapter.name}] DEBUG: saved error screenshot {error_screenshot_path}")
             print(f"[{adapter.name}] WARNING: Failed post capture: {link} ({exc})")
         finally:
             post_page.close()
@@ -373,6 +399,24 @@ def _save_html_snapshot(page: "Page", path: Path, platform_name: str) -> None:
 
     if last_exc is not None:
         print(f"[{platform_name}] WARNING: Failed to save HTML snapshot: {path} ({last_exc})")
+
+
+def _save_error_screenshot(
+    page: "Page",
+    account_output_dir: Path,
+    visited_count: int,
+    url: str,
+) -> Optional[Path]:
+    try:
+        png_bytes = page.screenshot(full_page=False, type="png")
+    except Exception:
+        return None
+    out_path = account_output_dir / f"error_{visited_count:03d}__{_url_slug(url)}.png"
+    try:
+        out_path.write_bytes(png_bytes)
+    except Exception:
+        return None
+    return out_path
 
 
 def _url_slug(url: str) -> str:
