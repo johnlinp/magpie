@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 
 from magpie.utils import account_slug_from_url, extract_datetime_from_page
 
@@ -15,6 +15,9 @@ else:
 class RedditAdapter:
     name = "reddit"
 
+    def __init__(self) -> None:
+        self._listing_datetimes_by_url: dict[str, datetime] = {}
+
     def is_supported(self, account_url: str) -> bool:
         host = (urlparse(account_url).hostname or "").lower()
         return host == "reddit.com" or host.endswith(".reddit.com")
@@ -23,6 +26,11 @@ class RedditAdapter:
         return account_slug_from_url(account_url)
 
     def collect_post_links(self, page: Page, account_url: str) -> list[str]:
+        self._listing_datetimes_by_url = {}
+        links = self._collect_post_links_from_listing_api(page, account_url, None)
+        if links:
+            return links
+
         links: list[str] = []
         seen: set[str] = set()
         self._append_links_from_page(page, account_url, seen, links)
@@ -55,6 +63,18 @@ class RedditAdapter:
 
         return links
 
+    def collect_post_links_since(
+        self, page: Page, account_url: str, start_date: Optional[date]
+    ) -> list[str]:
+        self._listing_datetimes_by_url = {}
+        links = self._collect_post_links_from_listing_api(page, account_url, start_date)
+        if links:
+            return links
+        return self.collect_post_links(page, account_url)
+
+    def profile_post_datetime(self, post_url: str) -> Optional[datetime]:
+        return self._listing_datetimes_by_url.get(post_url)
+
     def wait_for_post_ready(self, post_page: Page) -> None:
         try:
             post_page.wait_for_load_state("networkidle", timeout=5000)
@@ -72,6 +92,70 @@ class RedditAdapter:
 
     def extract_post_datetime(self, post_page: Page) -> Optional[datetime]:
         return extract_datetime_from_page(post_page)
+
+    def _collect_post_links_from_listing_api(
+        self, page: Page, account_url: str, start_date: Optional[date]
+    ) -> list[str]:
+        endpoint = self._listing_json_endpoint(account_url)
+        if endpoint is None:
+            return []
+
+        links: list[str] = []
+        seen: set[str] = set()
+        after: Optional[str] = None
+
+        for _ in range(25):
+            params = {"limit": "100", "raw_json": "1"}
+            if after:
+                params["after"] = after
+            url = f"{endpoint}?{urlencode(params)}"
+            try:
+                resp = page.context.request.get(
+                    url,
+                    headers={"referer": account_url, "accept": "application/json"},
+                    timeout=20000,
+                )
+                if not resp.ok:
+                    break
+                payload = resp.json()
+            except Exception:
+                break
+
+            data = payload.get("data") if isinstance(payload, dict) else None
+            children = data.get("children") if isinstance(data, dict) else None
+            if not isinstance(children, list) or not children:
+                break
+
+            oldest_date_on_page: Optional[date] = None
+            page_added = 0
+            for child in children:
+                child_data = child.get("data") if isinstance(child, dict) else None
+                if not isinstance(child_data, dict):
+                    continue
+                permalink = child_data.get("permalink")
+                if not isinstance(permalink, str) or "/comments/" not in permalink:
+                    continue
+                normalized = self._normalize_permalink(permalink)
+                created = child_data.get("created_utc")
+                dt = self._datetime_from_created_utc(created)
+                if dt is not None:
+                    self._listing_datetimes_by_url[normalized] = dt
+                    created_date = dt.date()
+                    if oldest_date_on_page is None or created_date < oldest_date_on_page:
+                        oldest_date_on_page = created_date
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                links.append(normalized)
+                page_added += 1
+
+            after = data.get("after") if isinstance(data, dict) else None
+            if not after or page_added == 0:
+                break
+            if start_date is not None and oldest_date_on_page is not None and oldest_date_on_page < start_date:
+                break
+
+        return links
 
     def _append_links_from_page(
         self, page: Page, base_url: str, seen: set[str], out_links: list[str]
@@ -124,6 +208,27 @@ class RedditAdapter:
             if old_submitted not in fallbacks:
                 fallbacks.append(old_submitted)
         return fallbacks
+
+    def _listing_json_endpoint(self, account_url: str) -> Optional[str]:
+        parsed = urlparse(account_url)
+        path = parsed.path.rstrip("/")
+        parts = [part for part in path.split("/") if part]
+        if len(parts) >= 2 and parts[0] == "r":
+            subreddit = parts[1]
+            return f"https://www.reddit.com/r/{subreddit}/new.json"
+        if len(parts) >= 2 and parts[0] == "user":
+            username = parts[1]
+            return f"https://www.reddit.com/user/{username}/submitted.json"
+        return None
+
+    def _normalize_permalink(self, permalink: str) -> str:
+        parsed = urlparse(urljoin("https://www.reddit.com", permalink))
+        return f"https://www.reddit.com{parsed.path}"
+
+    def _datetime_from_created_utc(self, value: Any) -> Optional[datetime]:
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        return None
 
     def _is_network_block_page(self, page: Page) -> bool:
         try:

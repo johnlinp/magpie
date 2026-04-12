@@ -320,6 +320,10 @@ def _collect_account_post_links(
     account_url: str,
     start_date: Optional[date],
 ) -> list[str]:
+    collect_post_links_since = getattr(adapter, "collect_post_links_since", None)
+    if callable(collect_post_links_since):
+        return collect_post_links_since(page, account_url, start_date)
+
     if getattr(adapter, "name", None) != "x":
         return adapter.collect_post_links(page, account_url)
 
