@@ -16,6 +16,8 @@ ACCOUNT_PAGE_SCROLL_PAUSE_MS = 1000
 ACCOUNT_PAGE_MAX_SCROLLS = 40
 ACCOUNT_PAGE_STALL_LIMIT = 3
 ACCOUNT_PAGE_POST_BOUNDARY_BUFFER_SCROLLS = 3
+HTML_SNAPSHOT_RETRIES = 3
+HTML_SNAPSHOT_RETRY_DELAY_MS = 500
 SCREENSHOT_WIDTH = 1600
 SCREENSHOT_HEIGHT = 900
 DEFAULT_USER_AGENT = (
@@ -345,10 +347,23 @@ def _scroll_account_page(page: "Page") -> None:
 
 
 def _save_html_snapshot(page: "Page", path: Path, platform_name: str) -> None:
-    try:
-        path.write_text(page.content(), encoding="utf-8")
-    except Exception as exc:
-        print(f"[{platform_name}] WARNING: Failed to save HTML snapshot: {path} ({exc})")
+    last_exc: Optional[Exception] = None
+    for attempt in range(HTML_SNAPSHOT_RETRIES):
+        try:
+            path.write_text(page.content(), encoding="utf-8")
+            return
+        except Exception as exc:
+            last_exc = exc
+            if attempt == HTML_SNAPSHOT_RETRIES - 1:
+                break
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=2000)
+            except Exception:
+                pass
+            page.wait_for_timeout(HTML_SNAPSHOT_RETRY_DELAY_MS)
+
+    if last_exc is not None:
+        print(f"[{platform_name}] WARNING: Failed to save HTML snapshot: {path} ({last_exc})")
 
 
 def _url_slug(url: str) -> str:
