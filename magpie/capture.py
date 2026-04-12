@@ -237,7 +237,9 @@ def _process_account(
                 if not in_date_range(post_date, args.start_date, args.end_date):
                     skipped_out_of_range += 1
                     print(
-                        f"[{adapter.name}] WARNING: Skipped post (out of range {args.start_date}..{args.end_date}): {resolved_url}"
+                        f"[{adapter.name}] WARNING: Skipped post "
+                        f"(date={post_date}, out of range {args.start_date}..{args.end_date}): "
+                        f"{resolved_url}"
                     )
                     continue
 
