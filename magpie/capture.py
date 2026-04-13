@@ -253,14 +253,6 @@ def _process_account(
             if args.start_date or args.end_date:
                 if post_date is None:
                     skipped_missing_datetime += 1
-                    error_screenshot_path = _save_error_screenshot(
-                        post_page,
-                        account_output_dir,
-                        visited_count,
-                        resolved_url,
-                    )
-                    if error_screenshot_path is not None:
-                        print(f"[{adapter.name}] DEBUG: saved error screenshot {error_screenshot_path}")
                     print(
                         f"[{adapter.name}] WARNING: Skipped post (missing datetime): {resolved_url}"
                     )
@@ -300,14 +292,6 @@ def _process_account(
             print(f"[{adapter.name}] saved {out_path}")
         except Error as exc:
             post_errors += 1
-            error_screenshot_path = _save_error_screenshot(
-                post_page,
-                account_output_dir,
-                visited_count,
-                resolved_url if "resolved_url" in locals() else link,
-            )
-            if error_screenshot_path is not None:
-                print(f"[{adapter.name}] DEBUG: saved error screenshot {error_screenshot_path}")
             print(f"[{adapter.name}] WARNING: Failed post capture: {link} ({exc})")
         finally:
             post_page.close()
@@ -409,25 +393,6 @@ def _save_html_snapshot(page: "Page", path: Path, platform_name: str) -> None:
 
     if last_exc is not None:
         print(f"[{platform_name}] WARNING: Failed to save HTML snapshot: {path} ({last_exc})")
-
-
-def _save_error_screenshot(
-    page: "Page",
-    account_output_dir: Path,
-    visited_count: int,
-    url: str,
-) -> Optional[Path]:
-    try:
-        png_bytes = page.screenshot(full_page=False, type="png")
-    except Exception:
-        return None
-    out_path = account_output_dir / f"error_{visited_count:03d}__{_url_slug(url)}.png"
-    try:
-        out_path.write_bytes(png_bytes)
-    except Exception:
-        return None
-    return out_path
-
 
 def _url_slug(url: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", url)
