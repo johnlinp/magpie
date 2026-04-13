@@ -160,8 +160,8 @@ def _process_account(
         return
 
     account_slug = adapter.account_slug(account_url)
-    account_output_dir = screenshots_root / f"{adapter.name}__{account_slug}"
-    account_html_dir = html_root / f"{adapter.name}__{account_slug}"
+    account_output_dir = screenshots_root / account_slug
+    account_html_dir = html_root / account_slug
     ensure_dir(account_output_dir)
     ensure_dir(account_html_dir)
 
