@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import urlencode, urljoin, urlparse
@@ -14,6 +15,7 @@ else:
 
 class RedditAdapter:
     name = "reddit"
+    dedupe_screenshots = False
 
     def __init__(self) -> None:
         self._listing_datetimes_by_url: dict[str, datetime] = {}
@@ -76,6 +78,9 @@ class RedditAdapter:
         return self._listing_datetimes_by_url.get(post_url)
 
     def wait_for_post_ready(self, post_page: Page) -> None:
+        if self._has_embed_surface(post_page):
+            post_page.wait_for_timeout(1200)
+            return
         try:
             post_page.wait_for_load_state("networkidle", timeout=5000)
         except Exception:
@@ -92,6 +97,102 @@ class RedditAdapter:
 
     def extract_post_datetime(self, post_page: Page) -> Optional[datetime]:
         return extract_datetime_from_page(post_page)
+
+    def build_capture_html(self, post_url: str) -> str:
+        escaped_url = html.escape(post_url, quote=True)
+        return f"""<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      body {{
+        margin: 0;
+        min-height: 100vh;
+        background: #dae0e6;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }}
+      .frame {{
+        width: min(760px, 100%);
+        display: flex;
+        justify-content: center;
+      }}
+      blockquote.reddit-embed-bq {{
+        width: 100% !important;
+      }}
+    </style>
+  </head>
+  <body>
+    <div class="frame">
+      <blockquote class="reddit-embed-bq" data-embed-height="740">
+        <a href="{escaped_url}">{escaped_url}</a>
+      </blockquote>
+    </div>
+    <script async src="https://embed.reddit.com/widgets.js" charset="UTF-8"></script>
+  </body>
+</html>
+"""
+
+    def render_post_for_capture(self, post_page: Page, post_url: str) -> None:
+        post_page.set_content(self.build_capture_html(post_url), wait_until="domcontentloaded")
+        post_page.wait_for_function(
+            """
+            () => {
+              const hasScript = !!document.querySelector('script[src*="embed.reddit.com/widgets.js"]');
+              if (!hasScript) return false;
+              const iframe = document.querySelector('iframe[src*="redditmedia.com"], iframe[src*="reddit.com"]');
+              if (iframe) {
+                const rect = iframe.getBoundingClientRect();
+                if (rect.width > 250 && rect.height > 250) return true;
+              }
+              const text = (document.body && document.body.innerText || '').trim();
+              return text.includes('View on Reddit') || text.includes('Comment as');
+            }
+            """,
+            timeout=15000,
+        )
+        iframe_src = self._embed_iframe_src(post_page)
+        if iframe_src:
+            post_page.goto(iframe_src, wait_until="domcontentloaded", timeout=30000)
+            try:
+                post_page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            try:
+                post_page.wait_for_function(
+                    """
+                    () => {
+                      const body = document.body;
+                      if (!body) return false;
+                      const text = (body.innerText || '').trim();
+                      if (text.length < 80) return false;
+                      return (
+                        !!document.querySelector('h1, article, shreddit-post, faceplate-screen-reader-content') ||
+                        text.includes('comments') ||
+                        text.includes('Posted by')
+                      );
+                    }
+                    """,
+                    timeout=15000,
+                )
+            except Exception:
+                pass
+            post_page.wait_for_timeout(3000)
+            return
+
+        self._wait_for_embed_frame_content(post_page)
+        post_page.wait_for_timeout(5000)
+
+    def capture_png(self, post_page: Page) -> bytes:
+        frame = post_page.locator(".frame")
+        try:
+            frame.wait_for(state="visible", timeout=10000)
+            return frame.screenshot(type="png")
+        except Exception:
+            return post_page.screenshot(full_page=False, type="png")
 
     def _collect_post_links_from_listing_api(
         self, page: Page, account_url: str, start_date: Optional[date]
@@ -229,6 +330,81 @@ class RedditAdapter:
         if isinstance(value, (int, float)):
             return datetime.fromtimestamp(float(value), tz=timezone.utc)
         return None
+
+    def _wait_for_embed_frame_content(self, post_page: Page) -> None:
+        iframe = post_page.wait_for_selector(
+            'iframe[src*="embed.reddit.com"], iframe[src*="redditmedia.com"], iframe[src*="reddit.com"]',
+            timeout=15000,
+        )
+        if iframe is None:
+            return
+
+        frame = None
+        for _ in range(20):
+            try:
+                frame = iframe.content_frame()
+            except Exception:
+                frame = None
+            if frame is not None and frame.url and frame.url != "about:blank":
+                break
+            post_page.wait_for_timeout(500)
+
+        if frame is None:
+            return
+
+        try:
+            frame.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception:
+            pass
+        try:
+            frame.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
+        try:
+            frame.wait_for_function(
+                """
+                () => {
+                  const body = document.body;
+                  if (!body) return false;
+                  const text = (body.innerText || '').trim();
+                  if (text.length < 80) return false;
+                  const hasPostText =
+                    !!document.querySelector('h1, article, shreddit-post, faceplate-screen-reader-content');
+                  return hasPostText || text.includes('comments') || text.includes('Posted by');
+                }
+                """,
+                timeout=15000,
+            )
+        except Exception:
+            pass
+
+    def _embed_iframe_src(self, post_page: Page) -> Optional[str]:
+        iframe = post_page.query_selector(
+            'iframe[src*="embed.reddit.com"], iframe[src*="redditmedia.com"], iframe[src*="reddit.com"]'
+        )
+        if iframe is None:
+            return None
+        return iframe.get_attribute("src")
+
+    def _has_embed_surface(self, post_page: Page) -> bool:
+        try:
+            return bool(
+                post_page.evaluate(
+                    """
+                    () => {
+                      const iframe = document.querySelector('iframe[src*="redditmedia.com"], iframe[src*="reddit.com"]');
+                      if (iframe) {
+                        const rect = iframe.getBoundingClientRect();
+                        if (rect.width > 250 && rect.height > 250) return true;
+                      }
+                      const text = (document.body && document.body.innerText || '').trim();
+                      return text.includes('View on Reddit') || text.includes('Comment as');
+                    }
+                    """
+                )
+            )
+        except Exception:
+            return False
 
     def _is_network_block_page(self, page: Page) -> bool:
         try:

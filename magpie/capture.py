@@ -200,18 +200,18 @@ def _process_account(
         try:
             visited_count += 1
             resolved_url = link
-            if getattr(adapter, "name", None) == "instagram":
-                build_capture_html = getattr(adapter, "build_capture_html", None)
-                if callable(build_capture_html):
-                    generated_html_name = (
-                        f"post_{visited_count:03d}__{_url_slug(resolved_url)}__generated.html"
-                    )
-                    generated_html_path = account_html_dir / generated_html_name
-                    generated_html_path.write_text(
-                        build_capture_html(resolved_url),
-                        encoding="utf-8",
-                    )
-                adapter.render_post_for_capture(post_page, resolved_url)
+            build_capture_html = getattr(adapter, "build_capture_html", None)
+            render_post_for_capture = getattr(adapter, "render_post_for_capture", None)
+            if callable(build_capture_html) and callable(render_post_for_capture):
+                generated_html_name = (
+                    f"post_{visited_count:03d}__{_url_slug(resolved_url)}__generated.html"
+                )
+                generated_html_path = account_html_dir / generated_html_name
+                generated_html_path.write_text(
+                    build_capture_html(resolved_url),
+                    encoding="utf-8",
+                )
+                render_post_for_capture(post_page, resolved_url)
             else:
                 post_page.route("**/accounts/login/**", lambda route: route.abort())
                 post_page.goto(link, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
@@ -274,13 +274,19 @@ def _process_account(
                     )
                     continue
 
-            png_bytes = post_page.screenshot(full_page=False, type="png")
-            digest = sha256_hex(png_bytes)
-            if digest in hashes_seen:
-                skipped_duplicate += 1
-                print(f"[{adapter.name}] WARNING: Skipped post (duplicate screenshot): {resolved_url}")
-                continue
-            hashes_seen.add(digest)
+            capture_png = getattr(adapter, "capture_png", None)
+            if callable(capture_png):
+                png_bytes = capture_png(post_page)
+            else:
+                png_bytes = post_page.screenshot(full_page=False, type="png")
+            dedupe_screenshots = getattr(adapter, "dedupe_screenshots", True)
+            if dedupe_screenshots:
+                digest = sha256_hex(png_bytes)
+                if digest in hashes_seen:
+                    skipped_duplicate += 1
+                    print(f"[{adapter.name}] WARNING: Skipped post (duplicate screenshot): {resolved_url}")
+                    continue
+                hashes_seen.add(digest)
 
             if post_date is None:
                 date_part = "unknown"
